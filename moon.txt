@@ -1,0 +1,217 @@
+#ifdef __APPLE__
+#include <GLUT/glut.h>
+#else
+#include <GL/glut.h>
+#endif
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
+#include <cmath>
+#include <iostream>
+#include <cstdlib>
+
+const float PI = 3.1415926535f;
+
+GLuint moonTexture = 0;
+
+float rotX = 15.0f;
+float rotY = -20.0f;
+float zoom = -3.0f;
+bool autoRotate = true;
+
+bool loadTexture(const char* filename, GLuint& textureID)
+{
+    int width, height, channels;
+    unsigned char* data = stbi_load(filename, &width, &height, &channels, 0);
+
+    if (!data) {
+        std::cerr << "Failed to load texture: " << filename << std::endl;
+        return false;
+    }
+
+    GLenum format = GL_RGB;
+    if (channels == 1) format = GL_LUMINANCE;
+    else if (channels == 3) format = GL_RGB;
+    else if (channels == 4) format = GL_RGBA;
+
+    glGenTextures(1, &textureID);
+    glBindTexture(GL_TEXTURE_2D, textureID);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+
+    gluBuild2DMipmaps(GL_TEXTURE_2D, format, width, height, format, GL_UNSIGNED_BYTE, data);
+
+    stbi_image_free(data);
+    return true;
+}
+
+void drawTexturedSphere(float radius, int slices, int stacks)
+{
+    for (int i = 0; i < stacks; i++) {
+        float lat0 = PI * (-0.5f + (float)i / stacks);
+        float z0 = sinf(lat0);
+        float zr0 = cosf(lat0);
+
+        float lat1 = PI * (-0.5f + (float)(i + 1) / stacks);
+        float z1 = sinf(lat1);
+        float zr1 = cosf(lat1);
+
+        glBegin(GL_QUAD_STRIP);
+        for (int j = 0; j <= slices; j++) {
+            float lng = 2.0f * PI * (float)j / slices;
+            float x = cosf(lng);
+            float y = sinf(lng);
+
+            float u = (float)j / slices;
+            float v0 = (float)i / stacks;
+            float v1 = (float)(i + 1) / stacks;
+
+            glTexCoord2f(u, 1.0f - v0);
+            glNormal3f(x * zr0, y * zr0, z0);
+            glVertex3f(radius * x * zr0, radius * y * zr0, radius * z0);
+
+            glTexCoord2f(u, 1.0f - v1);
+            glNormal3f(x * zr1, y * zr1, z1);
+            glVertex3f(radius * x * zr1, radius * y * zr1, radius * z1);
+        }
+        glEnd();
+    }
+}
+
+void init()
+{
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_TEXTURE_2D);
+    glEnable(GL_LIGHTING);
+    glEnable(GL_LIGHT0);
+    glEnable(GL_COLOR_MATERIAL);
+    glShadeModel(GL_SMOOTH);
+
+    GLfloat lightPos[] = { -2.0f, 2.0f, 3.0f, 1.0f };
+    GLfloat ambient[] = { 0.25f, 0.25f, 0.25f, 1.0f };
+    GLfloat diffuse[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+
+    glLightfv(GL_LIGHT0, GL_POSITION, lightPos);
+    glLightfv(GL_LIGHT0, GL_AMBIENT, ambient);
+    glLightfv(GL_LIGHT0, GL_DIFFUSE, diffuse);
+
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+
+    if (!loadTexture("moon.png", moonTexture)) {
+        std::cerr << "Put moon.png next to the executable." << std::endl;
+        exit(1);
+    }
+}
+
+void display()
+{
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glLoadIdentity();
+
+    glTranslatef(0.0f, 0.0f, zoom);
+    glRotatef(rotX, 1.0f, 0.0f, 0.0f);
+    glRotatef(rotY, 0.0f, 1.0f, 0.0f);
+
+    glBindTexture(GL_TEXTURE_2D, moonTexture);
+    glColor3f(1.0f, 1.0f, 1.0f);
+
+    drawTexturedSphere(1.0f, 200, 200);
+
+    glutSwapBuffers();
+}
+
+void reshape(int w, int h)
+{
+    if (h == 0) h = 1;
+
+    glViewport(0, 0, w, h);
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(45.0, (double)w / (double)h, 0.1, 100.0);
+
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+}
+
+void keyboard(unsigned char key, int, int)
+{
+    switch (key) {
+    case 27:
+        exit(0);
+        break;
+
+    case ' ':
+        autoRotate = !autoRotate;
+        break;
+
+    case '+':
+    case '=':
+        zoom += 0.2f;
+        break;
+
+    case '-':
+    case '_':
+        zoom -= 0.2f;
+        break;
+    }
+
+    glutPostRedisplay();
+}
+
+void specialKeys(int key, int, int)
+{
+    switch (key) {
+    case GLUT_KEY_UP:
+        rotX -= 3.0f;
+        break;
+
+    case GLUT_KEY_DOWN:
+        rotX += 3.0f;
+        break;
+
+    case GLUT_KEY_LEFT:
+        rotY -= 3.0f;
+        break;
+
+    case GLUT_KEY_RIGHT:
+        rotY += 3.0f;
+        break;
+    }
+
+    glutPostRedisplay();
+}
+
+void idle()
+{
+    if (autoRotate) {
+        rotY += 0.08f;
+        if (rotY > 360.0f)
+            rotY -= 360.0f;
+    }
+
+    glutPostRedisplay();
+}
+
+int main(int argc, char** argv)
+{
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
+    glutInitWindowSize(900, 900);
+    glutCreateWindow("Exact Moon - OpenGL C++");
+
+    init();
+
+    glutDisplayFunc(display);
+    glutReshapeFunc(reshape);
+    glutKeyboardFunc(keyboard);
+    glutSpecialFunc(specialKeys);
+    glutIdleFunc(idle);
+
+    glutMainLoop();
+    return 0;
+}

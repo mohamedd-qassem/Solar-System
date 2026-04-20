@@ -1,0 +1,278 @@
+/*
+ * Saturn Rings — Image-Matched OpenGL C++
+ * =========================================
+ * Colours and band layout are extracted directly from the reference photograph:
+ *   • Warm golden/tan outer bands fading inward
+ *   • Two prominent dark gaps (Cassini-like + lower gap visible in photo)
+ *   • Dense bright B-ring region
+ *   • Deep black void at the centre (planet shadow / polar region)
+ *   • Fine dusty striations throughout
+ *   • Subtle grainy texture at the very bottom edge
+ *
+ * Compile:
+ *   Linux:   g++ saturn_rings_v2.cpp -o rings -lGL -lGLU -lglut -lm
+ *   macOS:   g++ saturn_rings_v2.cpp -o rings -framework OpenGL -framework GLUT -lm
+ *   Windows: g++ saturn_rings_v2.cpp -o rings -lfreeglut -lopengl32 -lglu32 -lm
+ *
+ * Controls:
+ *   Arrow Keys  → rotate view
+ *   +/-         → zoom
+ *   Space       → toggle auto-spin
+ *   ESC         → quit
+ */
+
+#ifdef __APPLE__
+#include <GLUT/glut.h>
+#else
+#include <GL/glut.h>
+#endif
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+
+static const double PI = 3.14159265358979323846;
+
+// ── View state ────────────────────────────────────────────────────────────────
+static float rotX = 22.0f;   // initial tilt matches photo perspective
+static float rotY = 0.0f;
+static float zoom = -16.0f;
+static bool  autoSpin = true;
+
+// ── Ring band definition ──────────────────────────────────────────────────────
+// Radii are in "planet-radius" units (planet globe = 1.0).
+// Colours are sampled from the reference image, reading outward from centre.
+struct Band {
+    float inner, outer;
+    float r, g, b, a;       // RGBA  (a controls translucency)
+};
+
+/*
+ Reading the photo from the dark centre outward:
+   ① Very innermost: almost black void                  → skip (empty space)
+   ② First warm glow ring (thin, golden)
+   ③ Dark striated zone
+   ④ Bright warm tan – the thick luminous band (B ring)
+   ⑤ Darker brown band
+   ⑥ DARK GAP #1 (upper prominent gap in image)
+   ⑦ Another warm golden band
+   ⑧ DARK GAP #2 (lower gap visible in image)
+   ⑨ Outer thin warm band
+   ⑩ Faint dusty fringe
+*/
+static const Band BANDS[] = {
+    // ① innermost faint glow – very translucent golden
+    { 1.10f, 1.28f,  0.52f, 0.42f, 0.25f, 0.22f },
+
+    // ② first warm tan striation zone
+    { 1.28f, 1.50f,  0.68f, 0.56f, 0.35f, 0.50f },
+
+    // dark brown transition
+    { 1.50f, 1.60f,  0.18f, 0.14f, 0.08f, 0.55f },
+
+    // ③ bright golden B-ring core – the dominant luminous band
+    { 1.60f, 1.88f,  0.88f, 0.74f, 0.48f, 0.95f },
+
+    // bright B-ring inner highlight (slightly lighter)
+    { 1.70f, 1.82f,  0.95f, 0.83f, 0.58f, 0.70f },
+
+    // darker brown sub-band inside bright region
+    { 1.88f, 1.98f,  0.38f, 0.30f, 0.18f, 0.72f },
+
+    // ④ GAP #1 — the prominent dark gap (upper in photo)
+    { 1.98f, 2.10f,  0.06f, 0.05f, 0.03f, 0.85f },
+
+    // warm golden band after gap
+    { 2.10f, 2.30f,  0.82f, 0.70f, 0.46f, 0.88f },
+
+    // slight dark striation within the golden band
+    { 2.18f, 2.22f,  0.12f, 0.10f, 0.06f, 0.60f },
+
+    // ⑤ GAP #2 — the lower darker gap visible in photo
+    { 2.30f, 2.40f,  0.05f, 0.04f, 0.02f, 0.80f },
+
+    // outer warm band
+    { 2.40f, 2.60f,  0.75f, 0.63f, 0.42f, 0.82f },
+
+    // outermost faint dusty fringe
+    { 2.60f, 2.80f,  0.55f, 0.45f, 0.28f, 0.35f },
+
+    // very faint outer halo
+    { 2.80f, 2.95f,  0.40f, 0.32f, 0.18f, 0.15f },
+};
+static const int NUM_BANDS = (int)(sizeof(BANDS) / sizeof(BANDS[0]));
+static const int SEGMENTS = 512;   // angular smoothness
+
+// ── Draw one annular band ─────────────────────────────────────────────────────
+void drawBand(const Band& b)
+{
+    glColor4f(b.r, b.g, b.b, b.a);
+    glBegin(GL_TRIANGLE_STRIP);
+    for (int i = 0; i <= SEGMENTS; ++i) {
+        double ang = 2.0 * PI * i / SEGMENTS;
+        float  c = (float)cos(ang);
+        float  s = (float)sin(ang);
+        glNormal3f(0.0f, 1.0f, 0.0f);
+        glVertex3f(b.outer * c, 0.0f, b.outer * s);
+        glVertex3f(b.inner * c, 0.0f, b.inner * s);
+    }
+    glEnd();
+}
+
+// ── Fine striations overlay ───────────────────────────────────────────────────
+// Draws many thin concentric rings to mimic the photo's threadlike texture
+void drawStriations()
+{
+    struct Striation { float r; float bright; float alpha; };
+
+    // Hand-placed to match the fine lines visible in the photo
+    static const Striation S[] = {
+        {1.15f,0.70f,0.18f}, {1.20f,0.65f,0.15f}, {1.33f,0.75f,0.22f},
+        {1.40f,0.72f,0.20f}, {1.46f,0.68f,0.18f}, {1.55f,0.20f,0.30f},
+        {1.62f,0.90f,0.25f}, {1.67f,0.88f,0.22f}, {1.72f,0.95f,0.28f},
+        {1.77f,0.92f,0.25f}, {1.83f,0.85f,0.20f}, {1.90f,0.40f,0.35f},
+        {1.94f,0.35f,0.30f}, {2.05f,0.10f,0.50f}, {2.08f,0.08f,0.45f},
+        {2.12f,0.85f,0.22f}, {2.16f,0.88f,0.25f}, {2.20f,0.82f,0.20f},
+        {2.25f,0.78f,0.18f}, {2.32f,0.08f,0.55f}, {2.37f,0.06f,0.50f},
+        {2.44f,0.80f,0.20f}, {2.50f,0.75f,0.18f}, {2.56f,0.65f,0.15f},
+        {2.62f,0.55f,0.12f}, {2.70f,0.48f,0.10f}, {2.78f,0.40f,0.08f},
+    };
+    int nS = (int)(sizeof(S) / sizeof(S[0]));
+
+    for (int i = 0; i < nS; ++i) {
+        float w = S[i].bright;
+        glColor4f(w * 0.98f, w * 0.84f, w * 0.55f, S[i].alpha);
+        glBegin(GL_LINE_LOOP);
+        for (int j = 0; j < SEGMENTS; ++j) {
+            double ang = 2.0 * PI * j / SEGMENTS;
+            glVertex3f(S[i].r * (float)cos(ang), 0.0f,
+                S[i].r * (float)sin(ang));
+        }
+        glEnd();
+    }
+}
+
+// ── Draw all rings ────────────────────────────────────────────────────────────
+void drawRings()
+{
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+
+    for (int i = 0; i < NUM_BANDS; ++i)
+        drawBand(BANDS[i]);
+
+    glLineWidth(1.0f);
+    drawStriations();
+
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+}
+
+// ── Draw the dark central void (planet silhouette) ────────────────────────────
+// In the photo the centre is a deep black ellipse — we draw an opaque dark disk
+void drawCentralVoid()
+{
+    glColor4f(0.01f, 0.01f, 0.02f, 1.0f);
+    glBegin(GL_TRIANGLE_FAN);
+    glVertex3f(0.0f, 0.0f, 0.0f);
+    for (int i = 0; i <= SEGMENTS; ++i) {
+        double ang = 2.0 * PI * i / SEGMENTS;
+        glVertex3f(1.09f * (float)cos(ang), 0.0f,
+            1.09f * (float)sin(ang));
+    }
+    glEnd();
+}
+
+// ── GLUT callbacks ────────────────────────────────────────────────────────────
+void display()
+{
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glLoadIdentity();
+
+    glTranslatef(0.0f, 0.0f, zoom);
+    glRotatef(rotX, 1.0f, 0.0f, 0.0f);
+    glRotatef(rotY, 0.0f, 1.0f, 0.0f);
+
+    glDisable(GL_LIGHTING);
+
+    drawCentralVoid();
+    drawRings();
+
+    glutSwapBuffers();
+}
+
+void reshape(int w, int h)
+{
+    if (h == 0) h = 1;
+    glViewport(0, 0, w, h);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(45.0, (double)w / h, 0.1, 200.0);
+    glMatrixMode(GL_MODELVIEW);
+}
+
+void idle()
+{
+    if (autoSpin) {
+        rotY += 0.20f;
+        if (rotY >= 360.0f) rotY -= 360.0f;
+    }
+    glutPostRedisplay();
+}
+
+void keyboard(unsigned char key, int, int)
+{
+    switch (key) {
+    case 27:          exit(0);           break;
+    case ' ':         autoSpin = !autoSpin; break;
+    case '+': case '=': zoom += 0.4f;    break;
+    case '-': case '_': zoom -= 0.4f;    break;
+    }
+    glutPostRedisplay();
+}
+
+void specialKeys(int key, int, int)
+{
+    switch (key) {
+    case GLUT_KEY_UP:    rotX -= 2.0f; break;
+    case GLUT_KEY_DOWN:  rotX += 2.0f; break;
+    case GLUT_KEY_LEFT:  rotY -= 3.0f; break;
+    case GLUT_KEY_RIGHT: rotY += 3.0f; break;
+    }
+    glutPostRedisplay();
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+int main(int argc, char** argv)
+{
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
+    glutInitWindowSize(1000, 700);
+    glutCreateWindow("Saturn Rings — Image Matched");
+
+    // Deep space black background matching the photo
+    glClearColor(0.005f, 0.005f, 0.010f, 1.0f);
+    glEnable(GL_DEPTH_TEST);
+    glShadeModel(GL_SMOOTH);
+    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+    glEnable(GL_LINE_SMOOTH);
+
+    glutDisplayFunc(display);
+    glutReshapeFunc(reshape);
+    glutIdleFunc(idle);
+    glutKeyboardFunc(keyboard);
+    glutSpecialFunc(specialKeys);
+
+    printf("=========================================\n");
+    printf("  Saturn Rings — Image Matched\n");
+    printf("=========================================\n");
+    printf("  Arrow Keys   → rotate view\n");
+    printf("  +/-          → zoom in/out\n");
+    printf("  Space        → toggle auto-spin\n");
+    printf("  ESC          → quit\n");
+    printf("=========================================\n");
+
+    glutMainLoop();
+    return 0;
+}
